@@ -29,7 +29,7 @@ require (
 	ocm.software/open-component-model/bindings/go/input/dir v0.0.3
 	ocm.software/open-component-model/bindings/go/input/file v0.0.4
 	ocm.software/open-component-model/bindings/go/input/utf8 v0.0.0-20260505072254-1c17fcd5c971
-	ocm.software/open-component-model/bindings/go/oci v0.0.40
+	ocm.software/open-component-model/bindings/go/oci v0.0.41
 	ocm.software/open-component-model/bindings/go/plugin v0.0.14
 	ocm.software/open-component-model/bindings/go/repository v0.0.8
 	ocm.software/open-component-model/bindings/go/rsa v0.0.0-20260505072254-1c17fcd5c971
@@ -111,7 +111,6 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
@@ -123,7 +122,6 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260226221140-a57be14db171 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260504160031-60b97b32f348 // indirect
-	google.golang.org/grpc v1.81.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
@@ -146,3 +144,9 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 )
+
+replace ocm.software/open-component-model/bindings/go/oci => ../bindings/go/oci
+
+replace ocm.software/open-component-model/bindings/go/transfer => ../bindings/go/transfer
+
+replace ocm.software/open-component-model/bindings/go/helm => ../bindings/go/helm

@@ -293,8 +293,13 @@ func processResource(resource descriptorv2.Resource, access runtime.Typed, id st
 		}
 		return []string{fmt.Sprintf("${%s.spec.file}", addResourceID)}, nil
 	case *ociv1.OCIImage:
-		if err := processOCIArtifact(resource, id, val, tgd, toSpec, resourceTransformIDs, i, uploadAsArtifact); err != nil {
+		producedTempFile, err := processOCIArtifact(resource, id, val, tgd, toSpec, resourceTransformIDs, i, uploadAsArtifact)
+		if err != nil {
 			return nil, fmt.Errorf("cannot process OCI artifact resource: %w", err)
+		}
+		if !producedTempFile {
+			// Direct OCI-to-OCI streaming -> no temp file to clean up.
+			return nil, nil
 		}
 		return []string{fmt.Sprintf("${%s.spec.file}", addResourceID)}, nil
 	case *helmv1.Helm:

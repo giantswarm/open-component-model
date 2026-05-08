@@ -700,6 +700,76 @@ func (repo *Repository) uploadOCIImage(ctx context.Context, newAccess runtime.Ty
 	return main, &access, nil
 }
 
+// TransferOCIImage streams an OCI artifact directly from a source repository
+// to this repository (the destination), without buffering the artifact through
+// a temporary OCI layout tar file. The blob graph is copied via
+// [oras.CopyGraph], which performs HEAD checks on the destination and skips
+// any blob that already exists there. This avoids:
+//
+//   - the multi-GiB temp file under [Repository.tempDir] that the
+//     download / upload split would otherwise materialise (no OOM risk on
+//     small hosts, no /tmp pressure),
+//   - re-fetching layers from the source for blobs that the destination
+//     already has,
+//   - re-pushing layers to the destination for blobs that already exist
+//     there.
+//
+// The destination repository's [oras.CopyGraphOptions] are reused so the same
+// concurrency and observability hooks (PreCopy, PostCopy, OnCopySkipped) apply.
+//
+// srcRepo is the repository the source store is opened against (typically a
+// different remote registry). targetAccess.ImageReference must be tagged.
+func (repo *Repository) TransferOCIImage(ctx context.Context, srcRepo *Repository, srcAccess, targetAccess *accessv1.OCIImage) (manifest ociImageSpecV1.Descriptor, newAccess *accessv1.OCIImage, err error) {
+	ctx = slogcontext.NewCtx(ctx, repo.logger)
+	done := log.Operation(ctx, "transfer oci image",
+		slog.String("source", srcAccess.ImageReference),
+		slog.String("target", targetAccess.ImageReference))
+	defer func() {
+		done(err)
+	}()
+
+	srcStore, err := srcRepo.resolver.StoreForReference(ctx, srcAccess.ImageReference)
+	if err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to open source store for %q: %w", srcAccess.ImageReference, err)
+	}
+
+	dstStore, err := repo.resolver.StoreForReference(ctx, targetAccess.ImageReference)
+	if err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to open destination store for %q: %w", targetAccess.ImageReference, err)
+	}
+
+	srcRef, err := looseref.ParseReference(srcAccess.ImageReference)
+	if err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to parse source image reference %q: %w", srcAccess.ImageReference, err)
+	}
+	dstRef, err := looseref.ParseReference(targetAccess.ImageReference)
+	if err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to parse target image reference %q: %w", targetAccess.ImageReference, err)
+	}
+	if err := dstRef.ValidateReferenceAsTag(); err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("can only transfer to %q if it is tagged: %w", targetAccess.ImageReference, err)
+	}
+
+	desc, err := srcStore.Resolve(ctx, srcRef.ReferenceOrTag())
+	if err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to resolve source reference %q: %w", srcAccess.ImageReference, err)
+	}
+
+	// Reuse the destination repo's CopyGraphOptions so registered PreCopy /
+	// PostCopy / OnCopySkipped hooks (and the dst.Exists check that powers
+	// blob deduplication) all apply to this direct path.
+	if err := oras.CopyGraph(ctx, srcStore, dstStore, desc, repo.resourceCopyOptions.CopyGraphOptions); err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to transfer OCI image %q to %q: %w", srcAccess.ImageReference, targetAccess.ImageReference, err)
+	}
+
+	if err := dstStore.Tag(ctx, desc, dstRef.Tag); err != nil {
+		return ociImageSpecV1.Descriptor{}, nil, fmt.Errorf("failed to tag transferred artifact with %q: %w", dstRef.Tag, err)
+	}
+
+	out := *targetAccess
+	return desc, &out, nil
+}
+
 // DownloadResource downloads a [*descriptor.Resource] from the repository.
 func (repo *Repository) DownloadResource(ctx context.Context, res *descriptor.Resource) (data blob.ReadOnlyBlob, err error) {
 	ctx = slogcontext.NewCtx(ctx, repo.logger)

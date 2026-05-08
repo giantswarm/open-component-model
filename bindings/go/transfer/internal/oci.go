@@ -14,7 +14,11 @@ import (
 	"ocm.software/open-component-model/bindings/go/transform/spec/v1alpha1/meta"
 )
 
-func processOCIArtifact(resource descriptorv2.Resource, id string, val *discoveryValue, tgd *transformv1alpha1.TransformationGraphDefinition, toSpec runtime.Typed, resourceTransformIDs map[int]string, i int, uploadAsOCIArtifact bool) error {
+// processOCIArtifact emits the transformation node(s) for an OCI image
+// resource. The returned bool reports whether the emitted nodes produce a
+// temporary file that needs to be cleaned up (true for the legacy Get+Add
+// path, false for the direct TransferOCIArtifact streaming path).
+func processOCIArtifact(resource descriptorv2.Resource, id string, val *discoveryValue, tgd *transformv1alpha1.TransformationGraphDefinition, toSpec runtime.Typed, resourceTransformIDs map[int]string, i int, uploadAsOCIArtifact bool) (bool, error) {
 	component := val.Descriptor.Component.Name
 	version := val.Descriptor.Component.Version
 
@@ -25,22 +29,39 @@ func processOCIArtifact(resource descriptorv2.Resource, id string, val *discover
 
 	var ociAccess ociv1.OCIImage
 	if err := json.Unmarshal(resource.Access.Data, &ociAccess); err != nil {
-		return fmt.Errorf("cannot unmarshal OCI access: %w", err)
+		return false, fmt.Errorf("cannot unmarshal OCI access: %w", err)
 	}
 
 	// e.g. ghcr.io/open-component-model/helmexample/charts/mariadb:12.2.7
 	// strip the domain part and keep the rest
 	referenceName, err := getReferenceName(ociAccess.ImageReference)
 	if err != nil {
-		return fmt.Errorf("cannot get reference name: %w", err)
+		return false, fmt.Errorf("cannot get reference name: %w", err)
 	}
 
-	// Create GetOCIArtifact transformation
+	// Fast path: both source and target are OCI registries -> emit a single
+	// TransferOCIArtifact node that streams blobs directly src -> dst via
+	// oras.CopyGraph. This avoids materialising the artifact in a temp tar
+	// file, prevents redundant fetches for blobs already present at the
+	// destination (HEAD-checked at dst), and prevents redundant pushes of
+	// the same blobs to the destination.
+	if uploadAsOCIArtifact {
+		if transferTransform, ok, err := ociTransferAsArtifact(toSpec, resource, addResourceID, staticReferenceName(referenceName)); err != nil {
+			return false, fmt.Errorf("failed to create direct oci transfer transformation: %w", err)
+		} else if ok {
+			tgd.Transformations = append(tgd.Transformations, transferTransform)
+			resourceTransformIDs[i] = addResourceID
+			return false, nil
+		}
+		// fall through to the legacy two-node Get+Add path if the target
+		// spec is not a plain OCI repository (e.g. CTF target).
+	}
+
 	unstructured, err := runtime.UnstructuredFromMixedData(map[string]any{
 		"resource": resource,
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create unstructured spec for GetOCIArtifact transformation: %w", err)
+		return false, fmt.Errorf("cannot create unstructured spec for GetOCIArtifact transformation: %w", err)
 	}
 
 	getArtifactTransform := transformv1alpha1.GenericTransformation{
@@ -52,24 +73,58 @@ func processOCIArtifact(resource descriptorv2.Resource, id string, val *discover
 	}
 	tgd.Transformations = append(tgd.Transformations, getArtifactTransform)
 
-	// Create AddLocalResource transformation
 	var addResourceTransform transformv1alpha1.GenericTransformation
 	if uploadAsOCIArtifact {
 		if addResourceTransform, err = ociUploadAsArtifact(toSpec, addResourceID, getResourceID, staticReferenceName(referenceName)); err != nil {
-			return fmt.Errorf("failed to create oci upload transformation: %w", err)
+			return false, fmt.Errorf("failed to create oci upload transformation: %w", err)
 		}
 	} else {
 		if addResourceTransform, err = ociUploadAsLocalResource(toSpec, component, version, addResourceID, getResourceID, staticReferenceName(referenceName)); err != nil {
-			return fmt.Errorf("failed to create local resource upload transformation: %w", err)
+			return false, fmt.Errorf("failed to create local resource upload transformation: %w", err)
 		}
 	}
 
 	tgd.Transformations = append(tgd.Transformations, addResourceTransform)
 
-	// Track this resource's transformation
 	resourceTransformIDs[i] = addResourceID
 
-	return nil
+	return true, nil
+}
+
+// ociTransferAsArtifact builds a TransferOCIArtifact transformation that
+// streams an OCI artifact directly from the source registry described by
+// resource.Access to the target registry described by toSpec (which must be a
+// plain OCI repository). When toSpec is not a plain OCI repository spec, ok
+// is false and the caller should fall back to the legacy Get+Add nodes.
+func ociTransferAsArtifact(toSpec runtime.Typed, resource descriptorv2.Resource, transformID string, referenceName referenceNameOption) (transformv1alpha1.GenericTransformation, bool, error) {
+	var ociSpec ocirepo.Repository
+	if err := scheme.Convert(toSpec, &ociSpec); err != nil {
+		// target is not an OCI registry repository -> fall back
+		return transformv1alpha1.GenericTransformation{}, false, nil
+	}
+	targetRepoBaseURL := ociSpec.BaseUrl
+	if ociSpec.SubPath != "" {
+		targetRepoBaseURL = targetRepoBaseURL + "/" + ociSpec.SubPath
+	}
+
+	spec, err := runtime.UnstructuredFromMixedData(map[string]any{
+		"resource": resource,
+		"targetAccess": map[string]any{
+			"type":           runtime.NewVersionedType(ociv1.LegacyType, ociv1.LegacyTypeVersion).String(),
+			"imageReference": referenceName(targetRepoBaseURL),
+		},
+	})
+	if err != nil {
+		return transformv1alpha1.GenericTransformation{}, false, fmt.Errorf("cannot create unstructured spec for TransferOCIArtifact transformation: %w", err)
+	}
+
+	return transformv1alpha1.GenericTransformation{
+		TransformationMeta: meta.TransformationMeta{
+			Type: runtime.NewVersionedType(ociv1alpha1.TransferOCIArtifactType, ociv1alpha1.Version),
+			ID:   transformID,
+		},
+		Spec: spec,
+	}, true, nil
 }
 
 // ociUploadAsLocalResource creates an AddLocalResource transformation that uploads the OCI artifact as a local resource to the target repository.

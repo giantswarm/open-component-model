@@ -61,6 +61,20 @@ func NewDefaultBuilder(
 		CredentialProvider: credentialProvider,
 	}
 
+	// Direct OCI-to-OCI streaming transformer. The fast path in the graph
+	// builder emits this single node when both endpoints are OCI registries,
+	// avoiding the temp-file buffer that the Get+Add split produces. It only
+	// activates if the underlying ResourceRepository implementation supports
+	// direct artifact transfer (the OCI ResourceRepository does).
+	var ociTransferOCIArtifact *ocitransformer.TransferOCIArtifact
+	if transferer, ok := resourceRepo.(ocitransformer.OCIArtifactTransferer); ok {
+		ociTransferOCIArtifact = &ocitransformer.TransferOCIArtifact{
+			Scheme:             transformerScheme,
+			Repository:         transferer,
+			CredentialProvider: credentialProvider,
+		}
+	}
+
 	// Helm transformers
 	getHelmChart := &helmtransformer.GetHelmChart{
 		Scheme:             transformerScheme,
@@ -77,7 +91,7 @@ func NewDefaultBuilder(
 		Scheme: transformerScheme,
 	}
 
-	return builder.NewBuilder(transformerScheme).
+	b := builder.NewBuilder(transformerScheme).
 		WithTransformer(&ociv1alpha1.OCIGetComponentVersion{}, ociGet).
 		WithTransformer(&ociv1alpha1.OCIAddComponentVersion{}, ociAdd).
 		WithTransformer(&ociv1alpha1.CTFGetComponentVersion{}, ociGet).
@@ -91,4 +105,8 @@ func NewDefaultBuilder(
 		WithTransformer(&helmv1alpha1.GetHelmChart{}, getHelmChart).
 		WithTransformer(&helmv1alpha1.ConvertHelmToOCI{}, convertHelmToOCI).
 		WithTransformer(&FileCleanupTransformation{}, fileCleanup)
+	if ociTransferOCIArtifact != nil {
+		b = b.WithTransformer(&ociv1alpha1.TransferOCIArtifact{}, ociTransferOCIArtifact)
+	}
+	return b
 }

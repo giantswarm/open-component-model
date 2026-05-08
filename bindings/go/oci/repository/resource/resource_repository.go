@@ -214,6 +214,65 @@ func (p *ResourceRepository) UploadResource(ctx context.Context, resource *descr
 	}
 }
 
+// TransferOCIArtifact transfers an OCI artifact directly from the source
+// registry described by srcResource.Access to the target registry described by
+// targetAccess, without buffering the artifact through a temporary OCI layout
+// tar file.
+//
+// This is the streaming alternative to the
+// DownloadResource -> UploadResource pair that the transformation graph would
+// otherwise emit for an OCI artifact. The direct path:
+//
+//   - skips the multi-GiB temp file in the agent's tmpdir (no OOM kills on
+//     small hosts),
+//   - skips re-fetching layers from the source for blobs the destination
+//     already has (oras.CopyGraph performs HEAD checks at the destination),
+//   - skips re-pushing layers to the destination for blobs that already exist
+//     there (same HEAD check).
+//
+// On success a copy of targetAccess is returned with no modifications -- the
+// caller already chose the final image reference.
+func (p *ResourceRepository) TransferOCIArtifact(ctx context.Context, srcResource *descriptor.Resource, targetAccess *v1.OCIImage, srcCredentials, targetCredentials map[string]string) (*v1.OCIImage, error) {
+	t := srcResource.Access.GetType()
+	obj, err := p.GetResourceRepositoryScheme().NewObject(t)
+	if err != nil {
+		return nil, fmt.Errorf("error creating new object for type %s: %w", t, err)
+	}
+	if err := p.GetResourceRepositoryScheme().Convert(srcResource.Access, obj); err != nil {
+		return nil, fmt.Errorf("error converting access to object of type %s: %w", t, err)
+	}
+
+	srcAccess, ok := obj.(*v1.OCIImage)
+	if !ok {
+		return nil, fmt.Errorf("unsupported source access type %s for OCI artifact transfer", t)
+	}
+
+	srcBaseURL, err := ociImageAccessToBaseURL(srcAccess)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving source base URL: %w", err)
+	}
+	dstBaseURL, err := ociImageAccessToBaseURL(targetAccess)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving target base URL: %w", err)
+	}
+
+	srcRepo, err := p.getRepository(&ociv1.Repository{BaseUrl: srcBaseURL}, srcCredentials)
+	if err != nil {
+		return nil, fmt.Errorf("error opening source repository: %w", err)
+	}
+	dstRepo, err := p.getRepository(&ociv1.Repository{BaseUrl: dstBaseURL}, targetCredentials)
+	if err != nil {
+		return nil, fmt.Errorf("error opening destination repository: %w", err)
+	}
+
+	if _, _, err := dstRepo.TransferOCIImage(ctx, srcRepo, srcAccess, targetAccess); err != nil {
+		return nil, fmt.Errorf("direct OCI transfer failed: %w", err)
+	}
+
+	out := *targetAccess
+	return &out, nil
+}
+
 func (p *ResourceRepository) getRepository(spec *ociv1.Repository, creds map[string]string) (*oci.Repository, error) {
 	repo, err := createRepository(spec, creds, p.filesystemConfig, p.userAgent)
 	if err != nil {

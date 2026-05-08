@@ -219,10 +219,15 @@ func TestBuildGraphDefinition_OCIImageUploadAsOCIArtifact(t *testing.T) {
 	tgd, err := BuildGraphDefinition(t.Context(), roots, false, CopyModeAllResources, UploadAsOciArtifact)
 	require.NoError(t, err)
 
-	assert.Len(t, tgd.Transformations, 4)
-	assert.Equal(t, ociv1alpha1.GetOCIArtifactV1alpha1, tgd.Transformations[0].Type)
-	addOCIType := runtime.NewVersionedType(ociv1alpha1.AddOCIArtifactType, ociv1alpha1.Version)
-	assert.Equal(t, addOCIType, tgd.Transformations[1].Type)
+	// When both source and target are OCI registries the graph builder
+	// emits a single TransferOCIArtifact node that streams blobs directly
+	// src -> dst (instead of the legacy GetOCIArtifact + AddOCIArtifact
+	// pair that buffered the artifact through a temp tar file). Because no
+	// temp file is produced, no FileCleanup node is appended either, so the
+	// graph contains only Transfer + AddComponentVersion.
+	transferType := runtime.NewVersionedType(ociv1alpha1.TransferOCIArtifactType, ociv1alpha1.Version)
+	assert.Len(t, tgd.Transformations, 2)
+	assert.Equal(t, transferType, tgd.Transformations[0].Type)
 }
 
 func TestBuildGraphDefinition_HelmResource(t *testing.T) {
